@@ -1,16 +1,6 @@
-K = kernel
-U = user
+K = src/kernel
+U = src/user
 B = build
-
-OBJS =	$K/boot.o \
-		$K/init.o \
-		$K/main.o \
-		$K/spinlock.o \
-		$K/uart.o \
-		$K/string.o	\
-		$K/plic.o \
-		$K/disk.o \
-		$K/sched.o
 
 TOOLPREFIX = riscv64-unknown-elf-
 
@@ -22,16 +12,29 @@ OBJDUMP = $(TOOLPREFIX)objdump
 
 CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb -gdwarf-2 -MD -mcmodel=medany 
 CFLAGS += -fno-common -nostdlib -Wno-main -fno-builtin -I. -fno-stack-protector 
-CFLAGS += -no-pie -fno-pie
+CFLAGS += -no-pie -fno-pie -ffreestanding -mno-relax
 
+LDFLAGS = -z max-page-size=4096
 
-$K/kernel: $(OBJS) $K/kernel.ld 
-	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS)
-	$(OBJDUMP) -d $K/kernel > kernel.asm
+KSRCS = $(notdir $(wildcard $K/*.c))
+KSRCS += $(notdir $(wildcard $K/*.S))
+KOBJS = $(KSRCS:.c=.o)
+KOBJS := $(KOBJS:.S=.o)
+KOBJS := $(patsubst %.o,$B/%.o,$(KOBJS))
+
+$B/%.o: $K/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$B/%.o: $K/%.S
+	$(CC) $(CFLAGS) -c $< -o $@
+
+kernel: $(KOBJS) $K/kernel.ld 
+	$(LD) $(LDFLAGS) -T $K/kernel.ld -o kernel $(KOBJS)
+	$(OBJDUMP) -d kernel > kernel.asm
 
 
 clean: 
-	rm -f */*.o */*.d */*.asm
+	rm -f */*.o */*.d */*.asm kernel
 
 
 # try to generate a unique GDB port
@@ -48,18 +51,18 @@ endif
 
 QEMU = qemu-system-riscv64
 
-QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m $(RAM) -smp $(CPUS) -nographic
+QEMUOPTS = -machine virt -bios none -kernel kernel -m $(RAM) -smp $(CPUS) -nographic
 QEMUOPTS += -global virtio-mmio.force-legacy=false
 # QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
 # QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 
-qemu: $K/kernel
+qemu: kernel
 	$(QEMU) $(QEMUOPTS)
 
 .gdbinit: .gdbinit.tmpl-riscv
 	sed "s/:1234/:$(GDBPORT)/" < $^ > $@
 
-qemu-gdb: $K/kernel .gdbinit fs.img
+qemu-gdb: kernel .gdbinit fs.img
 	@echo "*** Now run 'gdb' in another window." 1>&2
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 

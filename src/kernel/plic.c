@@ -1,37 +1,79 @@
 #include "riscv.h"
-#include "pmem.h"
 #include "plic.h"
+#include "spinlock.h"
+#include "string.h"
 
-#define PLIC_PRIO           0x0000      // PLIC priority register
-#define PLIC_IP             0x1000      // PLIC interrupt pending bit
-#define PLIC_ENABLE         0x2000      // PLIC interrupt enable bit
-#define PLIC_TARGET         0x200000    // PLIC per-target(hart) registers
-#define PLIC_TARGET_OFFSET  0x1000      // offset for threshold, claim/complete, registers of each target(hart context)
+#define PLIC_SOURCE_ID_MAX      1024    // Common PLIC can have 1024 sources
 
+#define PLIC_BASE               (char *)(0x0c000000)                // Base address of PLIC registers. 
+#define PLIC_PRIO               (0x0)                       // Source priority setting regsiter. 4Byte/source
+#define PLIC_PENDING            (0x1000)                    // Interrupt pending registers. 1bit/source
+#define PLIC_ENABLE(hart)       (0x2080 + (hart)*0x100)     // Interrupt enable registers. Add additional bit/bytes to access each sources. 1bit/source, 1kB/target
+// ------ These registers makes block per target ------
+#define PLIC_THRESHOLD(hart)    (0x201000 + (hart)*0x2000)  // Threshold register. 4B/target
+#define PLIC_CLAIM(hart)        (0x201004 + (hart)*0x2000)  // Claim register. 4B/target
+#define PLIC_COMPLETE(hart)     (PLIC_CLAIM(hart))          // Complete register. 4B/target. Shares same address with claim regitser
+// ------  4KB aligned per target -------
 
-void initPLIC(void)
+#define read_reg(addr)  (*((uint32 *)(PLIC_BASE + (addr))))
+#define write_reg(addr, val)    *((uint32 *)(PLIC_BASE + (addr))) = (val)
+
+struct plic_source_struct plic_source[PLIC_SOURCE_ID_MAX];
+struct spinlock_struct plic_source_lock;
+
+void plic_source_init(void)
 {
-    // Set Priority
+    // Init the lock for plic source managing
+    spinlock_init(&plic_source_lock, "plic_src");
 
-    // 
+    return;
+}
+
+void plic_register_source(uint32 id, void *service, uint32 prio, char *name)
+{
+    spinlock_acquire(&plic_source_lock);
+    strcpy(plic_source[id].name, name);
+    plic_source[id].service = service;
+    plic_source[id].prio = prio;
+    write_reg(PLIC_PRIO + 4 * id, prio);
+    spinlock_release(&plic_source_lock);
+}
+
+inline void plic_hart_init(int hartid)
+{
+    // Set threshold
+    write_reg(PLIC_THRESHOLD(hartid), 0);
+
+    // Enable all sources
+    for (int i = 0; i < 32; i++) {
+        write_reg(PLIC_ENABLE(hartid) + i * 4, 0xffffffff);
+    }
     return;
 }
 
 // Claim for interrupt. Returns id of claimed interrupt.
-inline uint32 claimPLIC(void)
+inline uint32 plic_claim(void)
 {
     // Read claim register
-    int hart = getHartid();
-    int id = *(PLIC_CLAIM(hart));
+    int hart = get_hartid();
+    int id = read_reg(PLIC_CLAIM(hart));
 
     return id;
 }
 
-void completePLIC(int intr_id)
+// Send completion msg to PLIC
+inline void plic_complete(int intr_id)
 {
     // Write complete reigster
-    int hart = getHartid();
-    *(PLIC_CLAIM(hart)) = intr_id;
+    int hart = get_hartid();
+    write_reg(PLIC_CLAIM(hart), intr_id);
+    return;
 }
 
-void 
+inline void plic_do_service(int intr_id) 
+{
+    if (plic_source[intr_id].service) {
+        plic_source[intr_id].service();
+    }
+    return;
+}

@@ -4,34 +4,40 @@ ENTRY( _boot )
 SECTIONS
 {
     /* 
-    * qemu start at 0x80000000
+    * qemu virt board's ram starts at 0x80000000
     * _boot function must be located at 0x80000000
     */
     . = 0x80000000;
 
     .text : {
+        KEEP(*(.text.entry));
+        . = ALIGN(0x1000);
+        KEEP(*(.text.trap));
         *(.text .text.*)
-        . = ALIGN(0x1000);  /* 4kB page align */
+        PROVIDE(etext = .);
     }
 
     .rodata : {
-        . = ALIGN(16);
+        . = ALIGN(0x1000);
         *(.srodata .srodata.*) 
-        . = ALIGN(16);
+        . = ALIGN(0x1000);
         *(.rodata .rodata.*)
     }
 
     .data : {
-        . = ALIGN(16);
+        . = ALIGN(8);
         *(.sdata .sdata.*)
-        . = ALIGN(16);
+        . = ALIGN(8);
         *(.data .data.*)
     }
 
     .bss : {
-    . = ALIGN(16);
+    . = ALIGN(8);
     *(.sbss .sbss.*)
-    . = ALIGN(16);
+    . = ALIGN(8);
     *(.bss .bss.*)
     }
+
+    . = ALIGN(0x1000);
+    stack_bot = .;
 }
