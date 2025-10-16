@@ -1,2 +1,6 @@
-*/*.o
-*/*.d
+build/*
+test/*
+.gdbinit
+gdb.sh
+kernel
+kernel.asm
