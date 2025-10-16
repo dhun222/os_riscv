@@ -1,5 +1,5 @@
 OUTPUT_ARCH( "riscv" )
-ENTRY( _boot )
+ENTRY( _entry )
 
 SECTIONS
 {
@@ -8,36 +8,63 @@ SECTIONS
     * _boot function must be located at 0x80000000
     */
     . = 0x80000000;
-
-    .text : {
-        KEEP(*(.text.entry));
-        . = ALIGN(0x1000);
-        KEEP(*(.text.trap));
-        *(.text .text.*)
-        PROVIDE(etext = .);
-    }
-
-    .rodata : {
-        . = ALIGN(0x1000);
-        *(.srodata .srodata.*) 
-        . = ALIGN(0x1000);
-        *(.rodata .rodata.*)
-    }
-
-    .data : {
+    .boot.text : {
+        KEEP(*(.entry.text))
+        *(.boot.text)
         . = ALIGN(8);
-        *(.sdata .sdata.*)
+    }
+
+    .boot.rodata : {
+        *(.boot.rodata)
         . = ALIGN(8);
-        *(.data .data.*)
     }
 
-    .bss : {
-    . = ALIGN(8);
-    *(.sbss .sbss.*)
-    . = ALIGN(8);
-    *(.bss .bss.*)
+    .boot.data : {
+        *(.boot.data)
+        . = ALIGN(8);
     }
 
+    .boot.bss (NOLOAD) : {
+        *(.boot.bss)
+    }
     . = ALIGN(0x1000);
-    stack_bot = .;
+    PROVIDE(eboot = .);
+    PROVIDE(etext = LOADADDR(.rodata));
+    PROVIDE(erodata = LOADADDR(.data));
+    PROVIDE(ebss = erodata + SIZEOF(.data) + SIZEOF(.bss));
+    PROVIDE(_stack_bot = ebss);
+
+    KERNEL_VMA = 0xffff800000000000;
+    KERNEL_LMA = .;
+
+    . = KERNEL_VMA;
+    .text : AT(KERNEL_LMA + SIZEOF(.info)){
+        KEEP(*(.text.main))
+        *(.text .text.*)
+        . = ALIGN(0x1000);
+    }
+
+    .rodata : AT(KERNEL_LMA + SIZEOF(.text) + SIZEOF(.info)){
+        *(.srodata .srodata.*) 
+        *(.rodata .rodata.*)
+        . = ALIGN(0x1000);
+    }
+
+    .data : AT(KERNEL_LMA + SIZEOF(.info) + SIZEOF(.text) + SIZEOF(.rodata)) {
+        *(.sdata .sdata.*)
+        *(.data .data.*)
+        . = ALIGN(0x1000);
+    }
+
+    .bss (NOLOAD) : AT(KERNEL_LMA + SIZEOF(.inf0) + SIZEOF(.text) + SIZEOF(.rodata) + SIZEOF(.data)) {
+        *(.sbss .sbss.*)
+        *(.bss .bss.*)
+        . = ALIGN(0x1000);
+    }
+
+    /DISCARD/ : {
+        *(.eh_frame)
+        *(.eh_frame_hdr)
+        *(.gcc_except_table)
+    }
 }

@@ -5,9 +5,9 @@ struct spinlock_struct {
     int locked;
     // for debugging
     char name[10];
+    int hart;   // hart holding this lock
 };
 
 void spinlock_init(struct spinlock_struct *l, char *name);
 void spinlock_acquire(struct spinlock_struct *l);
 void spinlock_release(struct spinlock_struct *l);
-void spinlock_destroy(struct spinlock_struct *l);

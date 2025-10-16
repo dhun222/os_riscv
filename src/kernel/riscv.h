@@ -1,3 +1,4 @@
+#pragma once
 // riscv architecture specific operations
 
 #include "types.h"
@@ -22,7 +23,7 @@ struct context_struct {
 inline int get_hartid()
 {
     uint64 hart;
-    asm volatile ("sw tp, %0" : "=m" (hart) :);
+    asm volatile ("mv %0, tp" : "=r" (hart) :);
 
     return (int)hart;
 }

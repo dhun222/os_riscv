@@ -1,2 +1,4 @@
-void uart_init(void);
+#pragma once
+
+void uart_init();
 void puts(char *s);
