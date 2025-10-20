@@ -1,8 +1,11 @@
 #include "types.h"
 #include "riscv.h"
 #include "plic.h"
+#include "timer.h"
+#include "syscall.h"
+#include "trap.h"
 
-#define EXCEPTION_CODE_MASK (0xff)
+#define EXCEPTION_CODE_MASK 0xff
 
 #define PANIC()  \
     do {                                                    \
@@ -10,8 +13,8 @@
         while(1);                                           \
     }while(0);                                              \
 
-__attribute__((section(".text.trap"), used))
-void trap(void)
+
+void trap_handler(void)
 {
     // Read scause register
     int64 scause;
@@ -22,6 +25,7 @@ void trap(void)
         // if MSB is 1 (which means it's negative in integer), it's interrupt
         if (exception_code == 5) {
             // Timer interrupt
+            timer_service();
         } 
         else if (exception_code == 9) {
             // External interrupt
@@ -45,11 +49,12 @@ void trap(void)
             // From U-mode
             switch (exception_code) {
                 case 8:
-                // syscall
+                    syscall();
                 break;
                 case 13:
                 // load page fault
                 // We can utilize this on copy on write for fork
+                break;
                 default:
                 // Kill this user process
                 // We may put specific encodidng into a0 register as return value
@@ -58,6 +63,5 @@ void trap(void)
         }
     }
 
-    // return
-    asm volatile ("sret":::);
+    return;
 }

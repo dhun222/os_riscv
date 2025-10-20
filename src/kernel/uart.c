@@ -4,10 +4,10 @@
 #include "uart.h"
 #include "plic.h"
 
-#define PLIC_ID 10
+#define IRQ_ID 10
 
 // Register address offset
-#define UART0       (uint8 *)(0x10000000)  // uart0 base address
+#define UART0       (uint8 *)(0xffff800010000000)  // uart0 base address
 #define UART_RHR    0b000       // RX holding register
 #define UART_THR    0b000       // TX holding register
 #define UART_IER    0b001       // Interrupt enable regsiter
@@ -34,8 +34,8 @@
 #define UART_RX_DATA_READY          (1<<0)
 #define UART_TX_HOLDING_EMPTY       (1<<5)
 
-#define read_reg(offset)            (*(UART0 + (offset)))
-#define write_reg(offset, val)      *((uint8 *)(UART0 + (offset))) = (val)
+#define read_reg(addr)            (*(uint8 *)(UART0 + (addr)))
+#define write_reg(addr, val)      *((uint8 *)(UART0 + (addr))) = (val)
 
 struct spinlock_struct uart_lock;
 
@@ -139,7 +139,7 @@ void uart_init(void)
 
     spinlock_init(&uart_lock, "uart");
 
-    plic_register_source(PLIC_ID, uart_service, 1, "uart");
+    plic_register_source(IRQ_ID, uart_service, 1, "uart");
 
     // Enable interrupts
     write_reg(UART_IER, UART_RHR_INTR_ENABLE | UART_THR_INTR_ENABLE | UART_RLS_INTR_ENABLE);

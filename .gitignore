@@ -1,6 +1,7 @@
 build/*
 test/*
-.gdbinit
+src/kernel/working/*
+.gdbinit*
 gdb.sh
 kernel
 kernel.asm

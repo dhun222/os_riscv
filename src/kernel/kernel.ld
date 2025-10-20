@@ -7,56 +7,69 @@ SECTIONS
     * qemu virt board's ram starts at 0x80000000
     * _boot function must be located at 0x80000000
     */
-    . = 0x80000000;
+    RAM_START = 0x80000000;
+    . = RAM_START;
     .boot.text : {
-        KEEP(*(.entry.text))
+        KEEP(*(.entry))
         *(.boot.text)
         . = ALIGN(8);
     }
+    PROVIDE(_main_paddr = .);
+    . += SIZEOF(.text);
+    PROVIDE(etext = .);
 
     .boot.rodata : {
+        KEEP(*(.boot.info))
         *(.boot.rodata)
         . = ALIGN(8);
     }
+    . += SIZEOF(.rodata);
+    PROVIDE(erodata = .);
 
     .boot.data : {
         *(.boot.data)
         . = ALIGN(8);
     }
 
+    . += SIZEOF(.data);
     .boot.bss (NOLOAD) : {
         *(.boot.bss)
     }
-    . = ALIGN(0x1000);
-    PROVIDE(eboot = .);
-    PROVIDE(etext = LOADADDR(.rodata));
-    PROVIDE(erodata = LOADADDR(.data));
-    PROVIDE(ebss = erodata + SIZEOF(.data) + SIZEOF(.bss));
-    PROVIDE(_stack_bot = ebss);
 
-    KERNEL_VMA = 0xffff800000000000;
-    KERNEL_LMA = .;
+    . += SIZEOF(.bss);
+    PROVIDE(_stack_bot = .);
+
+    KERNEL_VMA = 0xffff800080000000;
+    KERNEL_LMA = RAM_START;
 
     . = KERNEL_VMA;
-    .text : AT(KERNEL_LMA + SIZEOF(.info)){
+    . += SIZEOF(.boot.text);
+    .text : AT(KERNEL_LMA + SIZEOF(.boot.text)) {
         KEEP(*(.text.main))
         *(.text .text.*)
+        . = ALIGN(4);
+        KEEP(*(.text.trap))
         . = ALIGN(0x1000);
     }
 
-    .rodata : AT(KERNEL_LMA + SIZEOF(.text) + SIZEOF(.info)){
+    PROVIDE(_boot_info = .);
+    . += SIZEOF(.boot.rodata);
+    .rodata : AT(LOADADDR(.text) + SIZEOF(.text) + SIZEOF(.boot.rodata)) {
         *(.srodata .srodata.*) 
         *(.rodata .rodata.*)
         . = ALIGN(0x1000);
     }
 
-    .data : AT(KERNEL_LMA + SIZEOF(.info) + SIZEOF(.text) + SIZEOF(.rodata)) {
+    . += SIZEOF(.boot.data);
+    .data : AT(LOADADDR(.rodata) + SIZEOF(.rodata) + SIZEOF(.boot.data)) {
         *(.sdata .sdata.*)
         *(.data .data.*)
         . = ALIGN(0x1000);
     }
 
-    .bss (NOLOAD) : AT(KERNEL_LMA + SIZEOF(.inf0) + SIZEOF(.text) + SIZEOF(.rodata) + SIZEOF(.data)) {
+    . += SIZEOF(.boot.bss);
+    .bss (NOLOAD) : AT(LOADADDR(.data) + SIZEOF(.data) + SIZEOF(.boot.bss)) {
+        . += SIZEOF(.boot.bss);
         *(.sbss .sbss.*)
         *(.bss .bss.*)
         . = ALIGN(0x1000);

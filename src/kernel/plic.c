@@ -5,7 +5,7 @@
 
 #define PLIC_SOURCE_ID_MAX      1024    // Common PLIC can have 1024 sources
 
-#define PLIC_BASE               (char *)(0x0c000000)                // Base address of PLIC registers. 
+#define PLIC_BASE               (uint8 *)0xffff80000c000000  // Base address of PLIC registers. 
 #define PLIC_PRIO               (0x0)                       // Source priority setting regsiter. 4Byte/source
 #define PLIC_PENDING            (0x1000)                    // Interrupt pending registers. 1bit/source
 #define PLIC_ENABLE(hart)       (0x2080 + (hart)*0x100)     // Interrupt enable registers. Add additional bit/bytes to access each sources. 1bit/source, 1kB/target
@@ -48,6 +48,7 @@ inline void plic_hart_init(int hartid)
     for (int i = 0; i < 32; i++) {
         write_reg(PLIC_ENABLE(hartid) + i * 4, 0xffffffff);
     }
+
     return;
 }
 

@@ -4,16 +4,13 @@
 #include "plic.h"
 #include "uart.h"
 #include "trap.h"
-
-/*
-#include "virtio.h"
-#include "sched.h"
-*/
+#include "timer.h"
+#include "schedule.h"
 
 #define N_HART 2
 
 extern char _stack_bot[];
-extern char _main[];
+extern char _main_paddr[];
 volatile uint64 stack_top __attribute__((section(".boot.bss")));
 volatile uint64 stack_bot __attribute__((section(".boot.bss")));
 extern int paging_on;
@@ -42,8 +39,6 @@ void main()
     if (hartid == 0) {
         plic_source_init();
         uart_init();
-        //disk_init();
-        //rtc_init();
     }
 
     // Per-hart init
@@ -51,11 +46,16 @@ void main()
     asm volatile("csrw stvec, %0" : : "r" (trap));
     // PLIC init
     plic_hart_init(hartid);
-    enable_intr();
+    // Initial user proc
+    //proc_init();
 
     // Call sched function to switch to init user process
     __sync_synchronize();
-    while(booted != N_HART);
+    int x;
+    do {
+        asm volatile("ld %0, %1" : "=r" (x) : "m" (booted));
+    } while(x != N_HART);
+
     //sched();
 }
 
@@ -73,14 +73,16 @@ void init(void)
     mstatus = mstatus & (~RISCV_MPP_MASK);
     mstatus = mstatus | RISCV_MPP_S;
     mstatus = mstatus & (~RISCV_SPIE);  // disable S-mode interrupt before ceding control to S-mode
+    mstatus = mstatus & (~RISCV_SIE);
     mstatus = mstatus & (~RISCV_MIE);   // disable M-mode interrupt for now
+    mstatus = mstatus & (~RISCV_MPIE);
     asm volatile("csrw mstatus, %0" : : "r" (mstatus));
 
     // We have to read out DT. 
     // But for now, I'm going to use jsut defined constants
     
-    // set all mie bits
-    asm volatile("csrw mie, %0" : : "r" (0x222));
+    // set all sie bits
+    //asm volatile("csrw mie, %0" : : "r" (0x222));
 
     // Delegate all interrupt and exception handling to S-Mode
     asm volatile("csrw mideleg, %0" : : "r" (0xffff));
@@ -90,6 +92,9 @@ void init(void)
     // TOR mode, all authority, tob boundary is same as max value in 56bit
     asm volatile("csrw pmpcfg0, %0" : : "r" (0x0f));
     asm volatile("csrw pmpaddr0, %0" : : "r" (0x3fffffffffffffull));
+
+    // Timer interrupt
+    timer_init(); 
     
     // paging
     int hartid = get_hartid();
@@ -105,14 +110,17 @@ void init(void)
     } while (x == 0);
 
     // write satp
-    uint64 satp = ((uint64)9 << 60) | (boot_info_src.pt_pool - boot_info_src.map_offset);
+    uint64 satp = ((uint64)9 << 60) | boot_info_src.pt_pool;
     asm volatile("\
         csrw satp, %0   \n\
         sfence.vma      \n\
         fence.i         \n\
         " : : "r" (satp));
 
-    asm volatile("csrw mepc, %0" : : "r" (KERNEL_BASE + 0x1000));
+        //
+    asm volatile("csrw stvec, %0" : : "r" (0x1000));
+    //
+    asm volatile("csrw mepc, %0" : : "r" (KERNEL_BASE + _main_paddr));
     asm volatile("mret");
 
     return;
