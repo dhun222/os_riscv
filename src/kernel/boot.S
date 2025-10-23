@@ -5,13 +5,12 @@
 .global _entry
 _entry:
     # set sp of each hart
-    # each hart has 4kB(= 1 page) sized kernel stack and guard page respectively. 
-    # Each hart needs 8kB(= 2 pages) for the krenel, and uses only 4kB for actual stack. 
+    # Each hart needs 2kB for stack while booting.
     # Disable paging
     csrw satp, 0
     # make space for stacks
-    la sp, _stack_bot
-    li a0, 8 * 1024
+    la sp, _kernel_end
+    li a0, 2 * 1024
     add sp, sp, a0
     csrr tp, mhartid
     mul a0, a0, tp

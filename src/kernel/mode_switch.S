@@ -4,7 +4,7 @@
 .section .text.trap
 .global trap
 trap:
-    # save all user context
+    # save caller save context
     sd t0, 0(sp)
     sd t1, 8(sp)
     sd t2, 16(sp)
@@ -29,6 +29,7 @@ trap:
     # call trap handler function
     call trap_handler
 
+.global ret_user
 ret_user:
     # All jobs are done
     # store kernel stack and recover user stack

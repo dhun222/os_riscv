@@ -6,8 +6,7 @@ struct plic_source_struct {
     char name[10];
 };
 
-void plic_source_init();
-void plic_hart_init(int hartid);
+void plic_init(int N_HART);
 void plic_register_source(uint32 id, void *service, uint32 prio, char *name);
 uint32 plic_claim(void);
 void plic_complete(int intr_id);

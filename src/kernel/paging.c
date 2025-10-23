@@ -1,3 +1,4 @@
+#include "riscv.h"
 #include "types.h"
 #include "paging.h"
 #include "memory.h"
@@ -5,15 +6,8 @@
 #include "spinlock.h"
 
 // sv48 --------------------------
-#define SATP_MODE       (uint64)9
 #define PTE_FLAG_OFFSET 10
 #define PTE_FLAG_MASK   0x3f
-#define V               1
-#define R               2
-#define W               4
-#define X               8
-#define U               16
-#define G               32
 #define MAX_VA          0xffffffffffffffff
 
 #define PTE_MAX_LEVEL   4
@@ -33,44 +27,31 @@
 // --------------------------------
 
 // For booting (referenced by physical address space) -----------------
-extern uint64 stack_bot;
-extern uint64 stack_top;
-extern char _boot_info[];
 extern char eboot[];
 extern char etext[];
 extern char erodata[];
-uint64 boot_data;
+extern char _kernel_end[];
 volatile int paging_on __attribute__((section(".boot.data"))) = 0;
 volatile struct boot_info_struct boot_info_src __attribute__((section(".boot.info")));
 // --------------------------------------------
 
+#define _N_HART 2
 extern char _boot_info[];
-volatile struct boot_info_struct *boot_info;
+volatile struct boot_info_struct *boot_info = (struct boot_info_struct *)_boot_info;
 struct spinlock_struct ref_cnt_lock;
-
-void write_satp(uint64 asid, pfn_t gpd)
-{
-    // ---------- satp ----------
-    // |63    60|59    44|43    0|
-    // |  MODE  |  ASID  |  PFN  |
-    // |    4   |   16   |   44  |
-    uint64 satp = (SATP_MODE << 60) | (asid << 44) | gpd; 
-    asm volatile("csrw satp, %0" : : "r" (satp));
-    return;
-}
 
 // Only used when first direct mapping while booting. 
 // Maps vpn and pfn. 
 // Works in the physical address space. 
-inline void kmap(vpn_t vpn, pfn_t pfn, char perm, pfn_t *pt_cnt)
+__attribute__((section(".boot.text")))
+void kmap(pagetable_t pt, vpn_t vpn, pfn_t pfn, char perm, pfn_t *pt_cnt)
 {
-    int level = PTE_MAX_LEVEL;
-    pagetable_t pt = (pagetable_t)(boot_info_src.pt_pool << PAGE_OFFSET);
+    uint8 level = PTE_MAX_LEVEL;
     while (--level) {
         uint32 offset = (vpn >> (VPN_OFFSET * level)) & VPN_MASK;
         pte_t *pte = &(pt[offset]);
-        if ((*pte & V) == 0) {
-            *pte = ((*pt_cnt) << PTE_FLAG_OFFSET) | V;
+        if ((*pte & PTE_V) == 0) {
+            *pte = ((*pt_cnt) << PTE_FLAG_OFFSET) | PTE_V;
             boot_info_src.ref_cnt[*pt_cnt] = 0;
             boot_info_src.ref_cnt[paddr2pfn(pt)]++;
             (*pt_cnt)++;
@@ -80,134 +61,251 @@ inline void kmap(vpn_t vpn, pfn_t pfn, char perm, pfn_t *pt_cnt)
     boot_info_src.ref_cnt[paddr2pfn(pt)]++;
     uint32 offset = vpn & VPN_MASK;
     pte_t *pte = &pt[offset];
-    *pte = pfn << (PTE_FLAG_OFFSET) | perm | V;
+    *pte = (pfn << (PTE_FLAG_OFFSET)) | PTE_G | perm | PTE_V;
 
     return;
 }
+
+// copies the first page table. 
+// If mid-level pt's can be shared, it makes them share.
+__attribute__((section(".boot.text")))
+void kcopy_pagetable(pagetable_t src, pagetable_t dest, pfn_t *pt_cnt)
+{
+    boot_info_src.ref_cnt[paddr2pfn(dest)] = boot_info_src.ref_cnt[paddr2pfn(src)];
+    for (int i = 0; i < 512; i++) {
+        if (src[i] & PTE_V) {
+            if (boot_info_src.ref_cnt[pte2pfn(src[i])] == 512 || (src[i] & (PTE_R | PTE_W | PTE_X))) {
+                // If next level's page table is full
+                // Copies pte exactly same
+                // So dest pagetable can point to same next level pagetable as src.
+                // Or if it's leaf pte, 
+                // Just copies pte.
+                dest[i] = src[i] | PTE_G;
+                // If mid-level pagetable's pte has PTE_G flag, it means that the pagetable that 
+                // pointed by the pte can be shared by all processes.
+            }
+            else {
+                // If not, it means dest pt needs seperate next level pagetable.
+                // Allocate new one and copy the contents.
+                dest[i] = (*pt_cnt << PTE_FLAG_OFFSET) | PTE_V;
+                pagetable_t dest_pt = (pagetable_t)pfn2paddr(*pt_cnt);
+                pagetable_t src_pt = (pagetable_t)pfn2paddr(pte2pfn(src[i]));
+                (*pt_cnt)++;
+                kcopy_pagetable(src_pt, dest_pt, pt_cnt);
+            }
+        }
+    }
+
+    return;
+}
+
+static inline void kmemcpy(char *src, char *dest, size_t size)
+{
+    while (size--) {
+        dest[size] = src[size];
+    }
+    return;
+}
+
+__attribute__((section(".boot.text")))
+void stack_init()
+{
+    int hartid = get_hartid();
+    if (hartid == 0) {
+        // get hardware info
+        uint64 ram_size = 512 * 1024 * 1024;   // 512MB 
+        uint64 mmio_end = 0x80000000;
+        
+        // calculate usable physical memory
+        int16 *ref_cnt = (int16 *)(_kernel_end);
+        paddr_t paddr_max = ram_size + mmio_end;
+        pfn_t pfn_max = paddr2pfn(paddr_max);
+        pfn_t pfn_low = paddr2pfn(_kernel_end); // lowest PFN excluding MMIO, kernel data, stack, text
+        pfn_t usable_pages = pfn_max - pfn_low;
+        pfn_t ref_cnt_size = usable_pages / 2049;
+        if (usable_pages % 2049) {
+            ref_cnt_size++;
+        }
+
+        pfn_t pt_pool = (pfn_low + ref_cnt_size);
+        pfn_t pt_pool_size = paddr_max >> 19;    // in pages. ram size in page / 128
+        pfn_t pfn_min = pt_pool + pt_pool_size;     // can be used by both user and kernel
+        ref_cnt -= pt_pool;
+
+        // save informations that are needed after enabling mmu
+        boot_info_src.N_HART = _N_HART;
+        boot_info_src.ram_size = ram_size;
+        boot_info_src.mmio_end = mmio_end;;
+        boot_info_src.PFN_MAX = pfn_max;
+        boot_info_src.PFN_MIN = pfn_min;
+        boot_info_src.ref_cnt = ref_cnt;
+        boot_info_src.pt_pool = pt_pool;
+
+        paging_on = 1;
+    }
+    __sync_synchronize();
+    int x;
+    do {
+        asm volatile("lw %0, %1" : "=r" (x) : "m" (paging_on));
+    } while (x == 0);
+
+    // Allocate a page for kernel stack
+    char *kernel_stack = (char *)pfn2paddr(boot_info_src.pt_pool + hartid);
+    boot_info_src.ref_cnt[boot_info_src.pt_pool + hartid] = 0;
+
+    // copy all content in the stack and move to new stack
+    char *stack_top = _kernel_end + (hartid + 1) * 2048;
+    char *stack_bot;
+    asm volatile("mv %0, sp" : "=r" (stack_bot) : );
+    size_t size = stack_top - stack_bot;
+    kmemcpy(stack_bot, kernel_stack + 4096 - size, size); 
+    stack_bot = kernel_stack + 4096 - size;
+    asm volatile("mv sp, %0" : : "r" (stack_bot));
+
+    __sync_synchronize();
+    asm volatile("amoadd.d %0, %1, %2" : "=r" (x) : "r" (1), "m" (paging_on));
+    do {
+        asm volatile("lw %0, %1" : "=r" (x) : "m" (paging_on));
+    } while (x <= boot_info_src.N_HART);
+    paging_on = -1; // paging_on < 0 -> already acquired by another hart
+
+    return;
+}
+
 // Init for paging
 // Setup initial global page directory and other data structures
 // for physical allocator and page table allocator
 __attribute__((section(".boot.text")))
 void paging_init()
 {
-    // get hardware info
-    uint64 ram_size = 512 * 1024 * 1024;   // 512MB 
-    uint64 mmio_end = 0x80000000;
-
-    // calculate usable physical memory
-    int16 *ref_cnt = (int16 *)(stack_top);
-    paddr_t paddr_max = ram_size + mmio_end;
-    pfn_t pfn_max = paddr2pfn(paddr_max);
-    pfn_t pfn_low = paddr2pfn(ref_cnt); // lowest PFN excluding MMIO, kernel data, stack, text
-    pfn_t usable_pages = pfn_max - pfn_low;
-    pfn_t ref_cnt_size = usable_pages / 2049;
-    if (usable_pages % 2049) {
-        ref_cnt_size++;
-    }
-
-    pfn_t pt_pool = (pfn_low + ref_cnt_size);
-    pfn_t pt_pool_size = paddr_max >> 21;    // in pages. ram size / 512
-    pfn_t pfn_min = pt_pool + pt_pool_size;     // can be used by both user and kernel
-    ref_cnt -= pt_pool;
-
-    // set 0's in pt_pool
-    for (pfn_t pt_i = pt_pool; pt_i < pt_pool + pt_pool_size; pt_i++) {
-        pagetable_t pt = (pagetable_t)pfn2paddr(pt_i);
-        for (int pte_i = 0; pte_i < 512; pte_i++) {
-            pt[pte_i] = 0;
+    // Now, all hart's moved to new stack. 
+    // We can modify ref_cnt and pt_pool
+    int hartid = get_hartid();
+    int x;
+    pfn_t pt_cnt = boot_info_src.pt_pool + boot_info_src.N_HART;
+    pagetable_t gpd = (pagetable_t)(pfn2paddr(pt_cnt));
+    if (hartid == 0) {
+        // init ref_cnt and pt_pool
+        for (pfn_t pfn = pt_cnt; pfn < boot_info_src.PFN_MAX; pfn++) {
+            boot_info_src.ref_cnt[pfn] = 1 << 15;
         }
+        for (pfn_t pfn_pt = pt_cnt; pfn_pt < boot_info_src.PFN_MIN; pfn_pt++) {
+            pagetable_t pt = (pagetable_t)pfn2paddr(pfn_pt);
+            for (int i = 0; i < 512; i++) {
+                pt[i] = 0;
+            }
+        }
+
+        // Make initial page table
+        boot_info_src.ref_cnt[pt_cnt] = 0;
+        pt_cnt++;
+
+        // MMIO
+        pfn_t pfn_s = 0;
+        pfn_t pfn_e = paddr2pfn(boot_info_src.mmio_end);
+        vpn_t vpn = vaddr2vpn(KERNEL_BASE);
+        for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
+            kmap(gpd, vpn, pfn, PTE_R | PTE_W, &pt_cnt);
+            vpn++;
+        }
+
+        // kernel text
+        pfn_s = pfn_e;
+        pfn_e = paddr2pfn(etext);
+        for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
+            kmap(gpd, vpn, pfn, PTE_R | PTE_X, &pt_cnt);
+            vpn++;
+        }
+
+        // kernel rodata
+        pfn_s = pfn_e;
+        pfn_e = paddr2pfn(erodata);
+        for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
+            kmap(gpd, vpn, pfn, PTE_R, &pt_cnt);
+            vpn++;
+        }
+
+        // kernel data, bss
+        pfn_s = pfn_e;
+        pfn_e = paddr2pfn(_kernel_end);
+        for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
+            kmap(gpd, vpn, pfn, PTE_R | PTE_W, &pt_cnt);
+            vpn++;
+        }
+
+        // ref_cnt and pt_pool
+        pfn_s = pfn_e;
+        pfn_e = boot_info_src.PFN_MIN;
+        for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
+            kmap(gpd, vpn, pfn, PTE_R | PTE_W, &pt_cnt);
+            vpn++;
+        }
+
+        // map stack
+        pfn_t kernel_stack = boot_info_src.pt_pool + hartid;
+        kmap(gpd, vaddr2vpn(MAX_VA), kernel_stack, PTE_R | PTE_W, &pt_cnt);
+        // map temp stack
+        kmap(gpd, kernel_stack, kernel_stack, PTE_R | PTE_W, &pt_cnt);
+
+        paging_on = 1;
     }
-    // set MSB 1's in ref_cnt
-    for (uint64 i = pt_pool; i < pfn_max; i++) {
-        ref_cnt[i] = -1;
+    else {
+        // copy first pagetable
+        // Because all kernels reference for same physical frames except it's stack page, 
+        // Many pagetables can be shared along process
+        // try to acquire simple spinlock
+        do {
+            asm volatile("amoswap.w %0, %1, %2" : "=r" (x) : "r" (-1), "m" (paging_on));
+        } while (x < 0);
+
+        pt_cnt = boot_info_src.pt_pool;
+        while (boot_info_src.ref_cnt[pt_cnt] >= 0) {
+            pt_cnt++;
+        }
+        pagetable_t new_gpd = (pagetable_t)pfn2paddr(pt_cnt);
+        pt_cnt++;
+        kcopy_pagetable(gpd, new_gpd, &pt_cnt);
+        gpd = new_gpd;
+
+        // map stack
+        pfn_t kernel_stack = boot_info_src.pt_pool + hartid;
+        kmap(gpd, vaddr2vpn(MAX_VA), kernel_stack, PTE_R | PTE_W, &pt_cnt);
+        // map temp stack
+        kmap(gpd, kernel_stack, kernel_stack, PTE_R | PTE_W, &pt_cnt);
+
+        // release simple spinlock
+        x++;
+        paging_on = x;
     }
 
-    // save informations that are needed after enabling mmu
-    boot_info_src.PFN_MAX = pfn_max;
-    boot_info_src.PFN_MIN = pfn_min;
-    boot_info_src.ref_cnt = ref_cnt;
-    boot_info_src.pt_pool = pt_pool;
-    boot_info_src.stack_size = stack_top - stack_bot;
-    boot_info_src.stack_bot = stack_bot;
+    do {
+        asm volatile("lw %0, %1" : "=r" (x) : "m" (paging_on));
+    } while (x < boot_info_src.N_HART);
+    if (hartid == 0) {
+        boot_info_src.ref_cnt = (int16 *)((uint64)(boot_info_src.ref_cnt) + KERNEL_BASE);
+    }
+
+    write_satp(hartid, paddr2pfn(gpd));
     
-    // install initial page tables
-    pfn_t pt_cnt = pt_pool + 1;
-    vpn_t vpn = vaddr2vpn(KERNEL_BASE);
-    pfn_t pfn_s, pfn_e;
-    // MMIO
-    pfn_s = 0;
-    pfn_e = paddr2pfn(mmio_end);
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R | W, &pt_cnt);
-        vpn++;
-    }
+    return;
+}
 
-    // kernel text
-    pfn_s = pfn_e;
-    pfn_e = paddr2pfn(etext);
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R | X, &pt_cnt);
-        vpn++;
-    }
+// Do the rest of the init
+// Pull up sp, unmap temporarily mapped stack
+void enable_mmu()
+{
+    int hartid = get_hartid();
+    paddr_t stack_top = pfn2paddr(boot_info->pt_pool + hartid + 1);
+    paddr_t stack_bot;
+    asm volatile("mv %0, sp" : "=r" (stack_bot) : );
+    size_t size = stack_top - stack_bot - 1;
+    asm volatile("sub sp, %0, %1" : : "r" (MAX_VA), "r" (size));
 
-    // kernel rodata
-    pfn_s = paddr2pfn(etext);
-    pfn_e = paddr2pfn(erodata);
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R|W, &pt_cnt);
-        vpn++;
-    }
-
-    // kernel data and bss
-    pfn_s = paddr2pfn(erodata);
-    pfn_e = paddr2pfn(stack_bot);
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R | W, &pt_cnt);
-        vpn++;
-    }
-
-    // ref_cnt
-    pfn_s = paddr2pfn(stack_top);
-    pfn_e = pfn_s + ref_cnt_size;
-    boot_info_src.map_offset = vpn - pfn_s;
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R | W, &pt_cnt);
-        vpn++;
-    }
-
-    // pt_pool
-    pfn_s = pfn_e;
-    pfn_e = pfn_min;
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R | W, &pt_cnt);
-        vpn++;
-    }
-
-    // kernel stack
-    pfn_s = paddr2pfn(stack_bot);
-    pfn_e = paddr2pfn(stack_top);
-    vpn = paddr2pfn(MAX_VA - stack_top + stack_bot) + 1;
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(vpn, pfn, R | W, &pt_cnt);
-        vpn++;
-    }
-
-    // temporary mapping for stack
-    // enable_mmu() function will unamp this area
-    pfn_s = paddr2pfn(stack_bot);
-    pfn_e = paddr2pfn(stack_top);
-    for (pfn_t pfn = pfn_s; pfn < pfn_e; pfn++) {
-        kmap(pfn, pfn, R|W, &pt_cnt);
-    }
-
-    // modify some address into vaddr
-    boot_info_src.ref_cnt = ((int16 *)((uint64)stack_bot + KERNEL_BASE)) - boot_info_src.pt_pool;
-
-    __sync_synchronize();
-    paging_on = 1;
+    unmap(boot_info->pt_pool + hartid, 1);
 
     return;
 }
+
 
 // Allocates new pagetable in pt_pool and returns its pfn
 // Must acquire 'ref_cnt_lock' first
@@ -234,7 +332,7 @@ pfn_t alloc_page()
     // It takes O(n) time. 
     // ToDo: Make it into buddy system.
     pfn_t pfn = boot_info->PFN_MIN;
-    while ((boot_info->ref_cnt[pfn] != -1) && pfn < boot_info->PFN_MAX) {
+    while ((boot_info->ref_cnt[pfn] > 0) && pfn < boot_info->PFN_MAX) {
         pfn++;
     }
     if (pfn == boot_info->PFN_MAX) {
@@ -252,7 +350,7 @@ inline vaddr_t get_gpd_vaddr()
     asm volatile("csrr %0, satp" : "=r" (satp) :);
     satp &= PFN_MASK;
 
-    return (vaddr_t)(vpn2vaddr(satp + boot_info->map_offset));
+    return (vaddr_t)(vpn2vaddr(satp) + KERNEL_BASE);
 }
 
 // Maps vpn to pfn. 
@@ -268,21 +366,24 @@ void map(vpn_t vpn, pfn_t pfn, char perm)
     while (--level) {
         uint32 offset = (vpn >> (VPN_OFFSET * level)) & VPN_MASK;
         pte_t *pte = &pt[offset];
-        if ((*pte & V) == 0) {
-            *pte = (alloc_pt() << PTE_FLAG_OFFSET) | V;
-            boot_info->ref_cnt[vaddr2vpn(pt) - boot_info->map_offset]++;
+        if ((*pte & PTE_V) == 0) {
+            *pte = (alloc_pt() << PTE_FLAG_OFFSET) | PTE_V;
+            boot_info->ref_cnt[vaddr2vpn((uint64)pt - KERNEL_BASE)]++;
         }
-        pt = (pagetable_t)(vpn2vaddr(pte2pfn(*pte)) + boot_info->map_offset);
+        pt = (pagetable_t)(vpn2vaddr(pte2pfn(*pte)) + KERNEL_BASE);
     }
-    boot_info->ref_cnt[vaddr2vpn(pt) - boot_info->map_offset]++;
+    boot_info->ref_cnt[vaddr2vpn((uint64)pt - KERNEL_BASE)]++;
     spinlock_release(&ref_cnt_lock);
     uint32 offset = vpn & VPN_MASK;
     pte_t *pte = &pt[offset];
-    *pte = pfn << (PTE_FLAG_OFFSET) | perm | V;
+    *pte = pfn << (PTE_FLAG_OFFSET) | perm | PTE_V;
 
     return;
 }
 
+// unmaps mapping from vpn. 
+// If some pagetable or frames should be freed, 
+// it also frees them.
 void unmap(vpn_t vpn, uint64 size)
 {
     vpn_t end = vpn + size;
@@ -297,13 +398,13 @@ void unmap(vpn_t vpn, uint64 size)
         while (level) {
             offset[level] = (vpn >> (VPN_OFFSET * level)) & VPN_MASK;
             pte_t *pte = &(pt[level][offset[level]]);
-            if ((*pte & V) == 0) {
+            if ((*pte & PTE_V) == 0) {
                 // tried to unmap unavailable pte
                 // panic or return immediately
                 return;
             }
             level--;
-            pt[level] = (pagetable_t)(vpn2vaddr(pte2pfn(*pte) + boot_info->map_offset));
+            pt[level] = (pagetable_t)(vpn2vaddr(pte2pfn(*pte)) + KERNEL_BASE);
         }
         offset[level] = vpn & VPN_MASK;
 
@@ -311,7 +412,7 @@ void unmap(vpn_t vpn, uint64 size)
         // If can, erase serial pte's in the same page table
         spinlock_acquire(&ref_cnt_lock);
         uint32 i = offset[level];
-        pfn_t cur = vaddr2vpn(pt[level]) - boot_info->map_offset;
+        pfn_t cur = vaddr2vpn((uint64)pt[level] - KERNEL_BASE);
         while(vpn < end && i < 512) {
             pt[level][i] = 0;
             boot_info->ref_cnt[cur]--;
@@ -321,10 +422,9 @@ void unmap(vpn_t vpn, uint64 size)
         }
 
         while (boot_info->ref_cnt[cur] == 0) {  // There's no any pte in this page table
-            boot_info->ref_cnt[cur] = -1;  // free pagetable
+            boot_info->ref_cnt[cur] = 1 << 15;  // free pagetable
             level++;
             pt[level][offset[level]] = 0;
-            cur = vaddr2vpn(pt[level]) - boot_info->map_offset;
             boot_info->ref_cnt[cur]--;
         }
         spinlock_release(&ref_cnt_lock);
@@ -333,73 +433,26 @@ void unmap(vpn_t vpn, uint64 size)
     return;
 }
 
-// Do the rest of the job
-// We're in S-mode
-// Copies boot_info struct into virtual address space, 
-// unmaps temporary mapped pages, 
-// move up sp and pc
-void enable_mmu()
-{
-    // get boot info
-    boot_info = (struct boot_info_struct *)_boot_info;
-
-    // move up sp 
-    volatile int64 sp;
-    asm volatile("mv %0, sp" : "=r" (sp));
-    int64 offset = MAX_VA - ((uint64)(&(boot_info->ref_cnt[boot_info->pt_pool])) + boot_info->stack_size - KERNEL_BASE) + 1;
-    sp += offset;
-    asm volatile("mv sp, %0" : : "r" (sp));
-
-    // unmap temporary stack mapping
-    unmap(vaddr2vpn(boot_info->stack_bot), vaddr2vpn(boot_info->stack_size));
-
-    return;
-}
-
 // copies pagetable
-// for internal use
-// returns pfn of copied pagetable
-pfn_t _copy_pagetable(pfn_t pfn_src) 
+// src: pagetable of source process
+// returns pfn of new global page directory
+// Must acquire ref_cnt_lock first.
+pfn_t copy_pagetable(pagetable_t src)
 {
-    pagetable_t src_pt = (pagetable_t)vpn2vaddr(pfn_src + boot_info->map_offset);
-    pfn_t pfn_dest = alloc_pt();
-    pagetable_t dest = (pagetable_t)(vpn2vaddr(pfn_dest + boot_info->map_offset));
-    spinlock_acquire(&ref_cnt_lock);
-    boot_info->ref_cnt[pfn_dest] = boot_info->ref_cnt[pfn_src]; // copy ref_cnt value
-    spinlock_release(&ref_cnt_lock);
+    pfn_t dest_pt = alloc_pt();
+    boot_info->ref_cnt[dest_pt] = boot_info->ref_cnt[paddr2pfn(src)];
+    pagetable_t dest = (pagetable_t)pfn2paddr(dest_pt);
     for (int i = 0; i < 512; i++) {
-        if (src_pt[i] & V) {
-            if (dest[i] & (W | R | X)) {    // it's leaf pte
-                dest[i] = src_pt[i];    // copy exact same thing
+        if (src[i] & PTE_V) {
+            if (src[i] & PTE_G || src[i] & (PTE_R | PTE_W | PTE_X)) {
+                // pointint shared pagetable or leaf pte
+                dest[i] = src[i];
             }
             else {
-                dest[i] = src_pt[i] & PTE_FLAG_MASK; // copy only flag
-                dest[i] |= _copy_pagetable(pte2pfn(src_pt[i])) << PTE_FLAG_OFFSET;  // fill up with new page table's pfn
+                dest[i] = (copy_pagetable((pagetable_t)pfn2paddr(pte2pfn(src[i]))) << PTE_FLAG_OFFSET) | PTE_V;
             }
         }
     }
-    
-    return pfn_dest;
-}
 
-// copies pagetable
-// src: satp of source process
-// returns pfn of new global page directory
-pfn_t copy_pagetable(satp_t src)
-{
-    pfn_t pfn_src = src & PFN_MASK;
-    pagetable_t src_pt = (pagetable_t)vpn2vaddr(pfn_src + boot_info->map_offset);
-    pfn_t pfn_dest = alloc_pt();
-    pagetable_t dest = (pagetable_t)(vpn2vaddr(pfn_dest + boot_info->map_offset));
-    spinlock_acquire(&ref_cnt_lock);
-    boot_info->ref_cnt[pfn_dest] = boot_info->ref_cnt[pfn_src];// copy ref_cnt value
-    spinlock_release(&ref_cnt_lock);
-    for (int i = 0; i < 512; i++) {
-        if (src_pt[i] & V) {
-            dest[i] = src_pt[i];    // copy only flags
-            dest[i] |= _copy_pagetable(pte2pfn(src_pt[i])) << PTE_FLAG_OFFSET;
-        }
-    }
-
-    return pfn_dest;
+    return dest_pt;
 }

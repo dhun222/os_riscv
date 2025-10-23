@@ -1,4 +1,6 @@
 #include "types.h"
+#include "string.h"
+#include "riscv.h"
 
 struct spinlock_struct {
     // 0 : This lock is not held by any process, 1 : This lock is held by some process

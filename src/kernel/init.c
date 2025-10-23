@@ -6,23 +6,14 @@
 #include "trap.h"
 #include "timer.h"
 #include "schedule.h"
+#include "memory.h"
 
 #define N_HART 2
 
-extern char _stack_bot[];
 extern char _main_paddr[];
-volatile uint64 stack_top __attribute__((section(".boot.bss")));
-volatile uint64 stack_bot __attribute__((section(".boot.bss")));
-extern int paging_on;
-extern struct boot_info_struct boot_info_src;
 
-volatile char booted = 0;
+volatile static int booted = 0;
 
-__attribute__((section(".boot.text")))
-void breakpoint()
-{
-    return;
-}
 // Main function of the kernel. 
 // Now, we're in S-mode and virtual address space 
 // All interrupts are disabled. 
@@ -32,31 +23,41 @@ void breakpoint()
 __attribute__((section(".text.main")))
 void main() 
 {
-    enable_mmu();
-
     int hartid = get_hartid();
     // Global init
     if (hartid == 0) {
-        plic_source_init();
+        plic_init(N_HART);
         uart_init();
+        memory_init();
+        
+        __sync_synchronize();
+        booted = 1;
     }
+    int x;
+    do {
+        asm volatile("lw %0, %1" : "=r" (x) : "m" (booted));
+    } while (x == 0);
 
     // Per-hart init
+    // paging 
+    enable_mmu();
     // register S-mode interrupt handler
     asm volatile("csrw stvec, %0" : : "r" (trap));
-    // PLIC init
-    plic_hart_init(hartid);
     // Initial user proc
     //proc_init();
+    
 
     // Call sched function to switch to init user process
     __sync_synchronize();
-    int x;
+    asm volatile("amoadd.d %0, %1, %2" : "=r" (x) : "r" (1), "m" (booted));
     do {
         asm volatile("ld %0, %1" : "=r" (x) : "m" (booted));
-    } while(x != N_HART);
+    } while(x != N_HART + 1);
+
 
     //sched();
+    asm volatile("sd %0, -8(fp)" : : "r" (ret_user));
+    return;
 }
 
 /* 
@@ -93,31 +94,14 @@ void init(void)
     asm volatile("csrw pmpcfg0, %0" : : "r" (0x0f));
     asm volatile("csrw pmpaddr0, %0" : : "r" (0x3fffffffffffffull));
 
-    // Timer interrupt
-    timer_init(); 
-    
     // paging
-    int hartid = get_hartid();
-    if (hartid == 0) {
-        stack_bot = (uint64)_stack_bot;
-        stack_top = stack_bot + (N_HART) * 8 * 1024;
-        paging_init();
-    }
-    __sync_synchronize();
-    int x;
-    do {
-        asm volatile("lw %0, %1" : "=r" (x) : "m" (paging_on));
-    } while (x == 0);
+    stack_init();
+    paging_init();
 
-    // write satp
-    uint64 satp = ((uint64)9 << 60) | boot_info_src.pt_pool;
-    asm volatile("\
-        csrw satp, %0   \n\
-        sfence.vma      \n\
-        fence.i         \n\
-        " : : "r" (satp));
-
-        //
+    // timer
+    timer_init();
+    
+    //
     asm volatile("csrw stvec, %0" : : "r" (0x1000));
     //
     asm volatile("csrw mepc, %0" : : "r" (KERNEL_BASE + _main_paddr));

@@ -21,10 +21,20 @@
 struct plic_source_struct plic_source[PLIC_SOURCE_ID_MAX];
 struct spinlock_struct plic_source_lock;
 
-void plic_source_init(void)
+void plic_init(int N_HART)
 {
     // Init the lock for plic source managing
     spinlock_init(&plic_source_lock, "plic_src");
+
+    for (int hartid = 0; hartid < N_HART; hartid++) {
+        // Set threshold
+        write_reg(PLIC_THRESHOLD(hartid), 0);
+
+        // Enable all sources
+        for (int i = 0; i < 32; i++) {
+            write_reg(PLIC_ENABLE(hartid) + i * 4, 0xffffffff);
+        }
+    }
 
     return;
 }
@@ -37,19 +47,6 @@ void plic_register_source(uint32 id, void *service, uint32 prio, char *name)
     plic_source[id].prio = prio;
     write_reg(PLIC_PRIO + 4 * id, prio);
     spinlock_release(&plic_source_lock);
-}
-
-inline void plic_hart_init(int hartid)
-{
-    // Set threshold
-    write_reg(PLIC_THRESHOLD(hartid), 0);
-
-    // Enable all sources
-    for (int i = 0; i < 32; i++) {
-        write_reg(PLIC_ENABLE(hartid) + i * 4, 0xffffffff);
-    }
-
-    return;
 }
 
 // Claim for interrupt. Returns id of claimed interrupt.

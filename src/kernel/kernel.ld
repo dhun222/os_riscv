@@ -37,7 +37,7 @@ SECTIONS
     }
 
     . += SIZEOF(.bss);
-    PROVIDE(_stack_bot = .);
+    PROVIDE(_kernel_end = .);
 
     KERNEL_VMA = 0xffff800080000000;
     KERNEL_LMA = RAM_START;
